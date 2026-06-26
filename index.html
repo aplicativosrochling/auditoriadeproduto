@@ -493,6 +493,7 @@ body.cl-open{overflow:hidden;}
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 
+<base target="_blank">
 </head>
 <body>
 <div class="loading" id="loading"><div class="spinner"></div><span id="loadingMsg">Carregando...</span></div>
@@ -3633,6 +3634,7 @@ function printChecklist() {
   padding: 20px;
   transition: opacity .4s ease, visibility .4s ease;
 }
+#authScreen.hidden,
 .auth-screen.hidden {
   opacity: 0 !important;
   visibility: hidden !important;
@@ -4584,11 +4586,19 @@ function handleLogout() {
 }
 
 function showApp() {
-  document.getElementById('authScreen').classList.add('hidden');
+  const auth = document.getElementById('authScreen');
+  if (auth) {
+    auth.classList.add('hidden');
+    auth.style.display = 'none';
+  }
   document.querySelector('.app').style.display = 'flex';
 }
 function hideApp() {
-  document.getElementById('authScreen').classList.remove('hidden');
+  const auth = document.getElementById('authScreen');
+  if (auth) {
+    auth.classList.remove('hidden');
+    auth.style.display = 'flex';
+  }
   document.querySelector('.app').style.display = 'none';
   state.audits = []; state.filtered = [];
   state.currentViewId = null; state.currentEditId = null;
