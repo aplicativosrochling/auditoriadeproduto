@@ -1447,8 +1447,8 @@ async function retryCloudSync() {
       if (Array.isArray(remote) && remote.length > 0) {
         applyRemoteAudits(remote);
       } else {
-        await window.CloudSync.save(state.audits);
-        setCloudStatus('synced');
+        const ok = await window.CloudSync.save(state.audits);
+        setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync.lastError);
       }
       window.CloudSync.subscribe(applyRemoteAudits);
       notify('Conectado à nuvem! Sincronização em tempo real ativa.', 'success');
@@ -4295,17 +4295,17 @@ async function init() {
         applyRemoteAudits(remote);
       } else {
         // Nuvem vazia: envia o que já temos localmente para criar o documento
-        await window.CloudSync.save(state.audits);
-        setCloudStatus('synced');
+        const ok = await window.CloudSync.save(state.audits);
+        setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync?.lastError);
       }
       // Passa a ouvir mudanças feitas em outros navegadores/computadores em tempo real
       window.CloudSync.subscribe(applyRemoteAudits);
     } else {
-      setCloudStatus('offline', window.CloudSync.lastError);
+      setCloudStatus('offline', window.CloudSync?.lastError || 'Módulo Firebase não carregou (verifique bloqueio de CDN/rede).');
     }
   } catch (e) {
     console.warn('Erro ao sincronizar com Firebase:', e);
-    setCloudStatus('error', (e && e.message) || window.CloudSync.lastError);
+    setCloudStatus('error', (e && e.message) || window.CloudSync?.lastError);
   }
 }
 
@@ -4378,7 +4378,18 @@ document.addEventListener('keydown', (e) => {
 })();
 
 // ===== INICIAR =====
-init();
+// FIX: init() não pode rodar de forma síncrona aqui, porque o <script type="module">
+// do Firebase é sempre adiado (deferred) e ainda não executou neste ponto do parse.
+// window.CloudSync/window.CloudSyncReady ainda não existem, causando TypeError
+// ("Cannot read properties of undefined (reading 'lastError')") e abortando o
+// window.CloudSync.subscribe(...) — ou seja, o listener em tempo real nunca é criado.
+// DOMContentLoaded só dispara depois que os módulos deferred já rodaram, então é o
+// ponto seguro para chamar init().
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
 </script>
 </body>
 </html>
