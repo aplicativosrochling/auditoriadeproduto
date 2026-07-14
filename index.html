@@ -517,7 +517,7 @@ body.cl-open{overflow:hidden;}
     </div>
   </nav>
   <div class="sidebar-footer">
-    <div id="cloudStatus" style="font-size:11px;text-align:center;margin-bottom:10px;padding:7px 10px;background:var(--card);border-radius:9px;border:1px solid var(--border);">
+    <div id="cloudStatus" onclick="retryCloudSync()" style="font-size:11px;text-align:center;margin-bottom:10px;padding:7px 10px;background:var(--card);border-radius:9px;border:1px solid var(--border);">
       ☁️ Conectando...
     </div>
     <button class="theme-toggle" onclick="toggleTheme()">
@@ -1288,11 +1288,27 @@ body.cl-open{overflow:hidden;}
 
   try { enableIndexedDbPersistence(db).catch(()=>{}); } catch(e) {}
 
-  let _resolveReady;
-  window.CloudSyncReady = new Promise(res => { _resolveReady = res; });
-  window.CloudSync = { ready: false };
+  window.CloudSync = { ready: false, lastError: null };
   let _applyingRemote = false;
   let _unsub = null;
+
+  // Traduz erros técnicos do Firebase em mensagens que explicam a causa provável
+  function _friendlyError(e) {
+    const code = (e && e.code) || '';
+    if (code.includes('auth/operation-not-allowed') || code.includes('auth/admin-restricted-operation')) {
+      return 'Login anônimo desativado (Firebase > Authentication > Método de login).';
+    }
+    if (code.includes('auth/unauthorized-domain')) {
+      return 'Domínio não autorizado (Firebase > Authentication > Configurações > Domínios autorizados).';
+    }
+    if (code.includes('permission-denied')) {
+      return 'Regras do Firestore bloquearam o acesso (Firebase > Firestore > Regras).';
+    }
+    if (code.includes('network-request-failed') || code.includes('unavailable') || code.includes('auth/network-request-failed')) {
+      return 'Sem conexão com os servidores do Firebase (verifique internet/firewall/extensões).';
+    }
+    return (e && (e.message || e.code)) || 'Erro desconhecido ao conectar à nuvem.';
+  }
 
   function _authOnce() {
     return new Promise((resolve, reject) => {
@@ -1301,17 +1317,18 @@ body.cl-open{overflow:hidden;}
     });
   }
 
-  _authOnce().then(() => {
+  function _wireCloudSync() {
     window.CloudSync.ready = true;
+    window.CloudSync.lastError = null;
     window.CloudSync.save = async function(audits) {
       try { await setDoc(DOC_REF, { audits, updatedAt: serverTimestamp() }); return true; }
-      catch (e) { console.warn('Firestore save error:', e); return false; }
+      catch (e) { console.warn('Firestore save error:', e); window.CloudSync.lastError = _friendlyError(e); return false; }
     };
     window.CloudSync.loadOnce = async function() {
       try {
         const snap = await getDoc(DOC_REF);
         return snap.exists() ? (snap.data().audits || null) : null;
-      } catch (e) { console.warn('Firestore load error:', e); return null; }
+      } catch (e) { console.warn('Firestore load error:', e); window.CloudSync.lastError = _friendlyError(e); return null; }
     };
     window.CloudSync.subscribe = function(onChange) {
       if (_unsub) _unsub();
@@ -1319,15 +1336,37 @@ body.cl-open{overflow:hidden;}
         if (!snap.exists()) return;
         _applyingRemote = true;
         try { onChange(snap.data().audits || []); } finally { _applyingRemote = false; }
-      }, err => console.warn('Firestore snapshot error:', err));
+      }, err => {
+        console.warn('Firestore snapshot error:', err);
+        window.CloudSync.lastError = _friendlyError(err);
+        if (typeof window.onCloudSyncLost === 'function') window.onCloudSyncLost();
+      });
     };
     window.CloudSync.isApplyingRemote = () => _applyingRemote;
-    _resolveReady();
-  }).catch(e => {
-    console.warn('Firebase auth error:', e);
-    window.CloudSync.ready = false;
-    _resolveReady();
-  });
+  }
+
+  // Executa (ou reexecuta, em caso de retry) o login anônimo + preparo do CloudSync.
+  // Sempre cria uma nova Promise em window.CloudSyncReady para quem for aguardar de novo.
+  function _startAuth() {
+    let _resolve;
+    const readyPromise = new Promise(res => { _resolve = res; });
+    window.CloudSyncReady = readyPromise;
+    _authOnce().then(() => {
+      _wireCloudSync();
+      _resolve();
+    }).catch(e => {
+      console.warn('Firebase auth error:', e);
+      window.CloudSync.ready = false;
+      window.CloudSync.lastError = _friendlyError(e);
+      _resolve();
+    });
+    return readyPromise;
+  }
+
+  // Permite que a UI chame window.CloudSync.retry() para tentar reconectar sem recarregar a página
+  window.CloudSync.retry = function() { return _startAuth(); };
+
+  _startAuth();
 </script>
 <script>
 // ===== CONSTANTES =====
@@ -1375,7 +1414,7 @@ function toggleExportMenu() {
 }
 function closeExportMenu() { document.getElementById('exportMenu').style.display = 'none'; }
 
-function setCloudStatus(s) {
+function setCloudStatus(s, detail) {
   const el = document.getElementById('cloudStatus');
   if (!el) return;
   const map = {
@@ -1383,11 +1422,53 @@ function setCloudStatus(s) {
     saving:  '<span style="color:var(--accent)">⏫ Salvando...</span>',
     synced:  '<span style="color:var(--success)">🔄 Sincronizado</span>',
     loading: '☁️ Conectando...',
-    error:   '<span style="color:var(--danger)">⚠️ Erro na nuvem</span>',
-    offline: '<span style="color:var(--warning)">📴 Offline</span>',
+    error:   '<span style="color:var(--danger)">⚠️ Erro na nuvem — clique p/ tentar</span>',
+    offline: '<span style="color:var(--warning)">📴 Offline — clique p/ tentar</span>',
   };
   el.innerHTML = map[s] || s;
+  const actionable = (s === 'offline' || s === 'error');
+  el.title = detail ? detail : (actionable ? 'Clique para tentar reconectar à nuvem' : '');
+  el.style.cursor = actionable ? 'pointer' : 'default';
 }
+
+// Tenta reconectar ao Firebase sem precisar recarregar a página.
+// Reexecuta login anônimo + carrega/publica dados + volta a ouvir mudanças em tempo real (onSnapshot).
+let _retryingCloud = false;
+async function retryCloudSync() {
+  const el = document.getElementById('cloudStatus');
+  const actionable = el && el.style.cursor === 'pointer';
+  if (!actionable || _retryingCloud) return;
+  _retryingCloud = true;
+  setCloudStatus('loading');
+  try {
+    await window.CloudSync.retry();
+    if (window.CloudSync && window.CloudSync.ready) {
+      const remote = await window.CloudSync.loadOnce();
+      if (Array.isArray(remote) && remote.length > 0) {
+        applyRemoteAudits(remote);
+      } else {
+        await window.CloudSync.save(state.audits);
+        setCloudStatus('synced');
+      }
+      window.CloudSync.subscribe(applyRemoteAudits);
+      notify('Conectado à nuvem! Sincronização em tempo real ativa.', 'success');
+    } else {
+      setCloudStatus('offline', window.CloudSync.lastError);
+      notify(window.CloudSync.lastError || 'Ainda sem conexão com a nuvem.', 'warn');
+    }
+  } catch (e) {
+    console.warn('Erro ao reconectar com o Firebase:', e);
+    setCloudStatus('error', (e && e.message) || 'Erro ao reconectar.');
+    notify('Erro ao tentar reconectar à nuvem.', 'error');
+  } finally {
+    _retryingCloud = false;
+  }
+}
+
+// Se a conexão em tempo real cair depois de já estar sincronizada (ex: perda de rede), avisa e permite retry
+window.onCloudSyncLost = function() {
+  setCloudStatus('error', window.CloudSync.lastError);
+};
 
 
 // ===== INICIALIZAÇÃO =====
@@ -4220,16 +4301,17 @@ async function init() {
       // Passa a ouvir mudanças feitas em outros navegadores/computadores em tempo real
       window.CloudSync.subscribe(applyRemoteAudits);
     } else {
-      setCloudStatus('offline');
+      setCloudStatus('offline', window.CloudSync.lastError);
     }
   } catch (e) {
     console.warn('Erro ao sincronizar com Firebase:', e);
-    setCloudStatus('error');
+    setCloudStatus('error', (e && e.message) || window.CloudSync.lastError);
   }
 }
 
 // ===== EXPOSIÇÃO GLOBAL =====
 Object.assign(window, {
+  retryCloudSync,
   switchView, toggleTheme,
   openNewModal, closeModal, saveNew,
   openEditModal, saveEdit, deleteAudit,
