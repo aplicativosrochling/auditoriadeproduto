@@ -658,7 +658,6 @@ body.cl-open{overflow:hidden;}
         <div class="legend-item"><div class="legend-dot" style="background:linear-gradient(135deg,#ffb300,#e67e00);"></div>Em andamento</div>
         <div class="legend-item"><div class="legend-dot" style="background:linear-gradient(135deg,#ff3d57,#c9002a);"></div>Atrasado</div>
         <div class="legend-item"><div class="legend-dot" style="background:var(--border);"></div>Não agendado</div>
-        <div style="margin-left:auto;font-size:11px;color:var(--text-secondary);">💡 Barra com 📎 = clique para ver relatório · Barra ativa sem arquivo = clique para anexar · Barra vazia = clique para ativar</div>
       </div>
     </div>
   </div>
@@ -1724,7 +1723,7 @@ function renderGantt() {
           </div>
           <div style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
             <span class="badge ${a.status==='Aprovado'?'badge-green':a.status==='Pendente'?'badge-yellow':'badge-red'}">${a.status}</span>
-            ${a.checklist?.completedAt ? '<span class="cl-done-badge" style="font-size:10px;background:rgba(0,230,118,.15);color:var(--success);padding:1px 8px;border-radius:10px;">✓ Checklist</span>' : ''}
+            ${(a.checklist?.completedAt || (a.checklistsByMonth && Object.values(a.checklistsByMonth).some(c=>c?.completedAt))) ? '<span class="cl-done-badge" style="font-size:10px;background:rgba(0,230,118,.15);color:var(--success);padding:1px 8px;border-radius:10px;">✓ Checklist</span>' : ''}
           </div>
         </div>
         <div class="gantt-bars">
@@ -1732,11 +1731,11 @@ function renderGantt() {
             const cls     = ['bar-empty','bar-scheduled','bar-completed','bar-inprogress','bar-alert'][v] || 'bar-empty';
             const icon    = ['','📅','✓','⚡','⚠'][v] || '';
             const active  = v > 0;
-            const hasCl = !!a.checklist?.completedAt;
+            const hasCl = !!(a.checklistsByMonth && a.checklistsByMonth[i]?.completedAt);
             const execPill = active ? `<button class="gantt-bar-exec" title="${hasCl?'Ver / Editar Checklist':'Executar Checklist em '+MONTHS[i]}"
-              onclick="event.stopPropagation();openChecklist(${a.id})">${hasCl?'📋':'▶'}</button>` : '';
+              onclick="event.stopPropagation();openChecklist(${a.id},${i})">${hasCl?'📋':'▶'}</button>` : '';
             if (active) {
-              return `<div class="gantt-bar ${cls}" style="position:relative;" onclick="event.stopPropagation();openChecklist(${a.id})">
+              return `<div class="gantt-bar ${cls}" style="position:relative;" onclick="event.stopPropagation();openChecklist(${a.id},${i})">
                 ${execPill}
                 ${icon}
                 <div class="gantt-tooltip">
@@ -2506,6 +2505,33 @@ const CL_GROUPS_META = [
 ];
 
 let clCurrentAuditId = null;
+let clCurrentMonthIndex = null;
+
+// Migra o formato antigo (a.checklist único) para o novo formato por mês (a.checklistsByMonth).
+// Executa uma única vez por auditoria, na primeira abertura, para não perder dados já preenchidos.
+function _clMigrateLegacy(a) {
+  if (!a.checklist) return;
+  a.checklistsByMonth = a.checklistsByMonth || {};
+  let mi = null;
+  if (a.checklist.date) {
+    const d = new Date(a.checklist.date + 'T12:00:00');
+    if (!isNaN(d)) mi = d.getMonth();
+  }
+  if (mi == null || !(a.months && a.months[mi] > 0)) {
+    mi = a.months ? a.months.findIndex(v => v > 0) : -1;
+    if (mi < 0) mi = new Date().getMonth();
+  }
+  if (!a.checklistsByMonth[mi]) a.checklistsByMonth[mi] = a.checklist;
+  delete a.checklist;
+}
+
+function _clDefaultMonthFor(a) {
+  if (!a.months) return new Date().getMonth();
+  const now = new Date().getMonth();
+  if (a.months[now] > 0) return now;
+  const firstActive = a.months.findIndex(v => v > 0);
+  return firstActive >= 0 ? firstActive : now;
+}
 let clGroups = [];
 let clDecision = '';
 let clReadonly  = false;
@@ -3174,15 +3200,20 @@ function clDeleteRow(groupId, itemIdx) {
   renderChecklistTable();
 }
 
-function openChecklist(auditId) {
+function openChecklist(auditId, monthIndex) {
   const a = state.audits.find(x => x.id === auditId);
   if (!a) return;
-  clCurrentAuditId = auditId;
-  const saved = a.checklist;
+  _clMigrateLegacy(a);
+  a.checklistsByMonth = a.checklistsByMonth || {};
+
+  if (monthIndex == null) monthIndex = _clDefaultMonthFor(a);
+  clCurrentAuditId   = auditId;
+  clCurrentMonthIndex = monthIndex;
+  const saved = a.checklistsByMonth[monthIndex];
   clReadonly = !!(saved && saved.completedAt);
 
   document.getElementById('clTitle').textContent =
-    'Checklist — ' + a.sap + (a.desc ? ' · ' + a.desc.slice(0,40) : '');
+    'Checklist — ' + a.sap + ' · ' + (MONTHS[monthIndex] || '') + (a.desc ? ' · ' + a.desc.slice(0,40) : '');
   document.getElementById('clDesc').value   = a.desc   || '';
   document.getElementById('clFamily').value = a.family || 'Engine/Radiator/AGS';
   document.getElementById('clReadonlyBadge').style.display = clReadonly ? '' : 'none';
@@ -3258,7 +3289,7 @@ function openChecklist(auditId) {
   renderChecklistTable();
   recalcChecklist();
 
-  const saved_d = a.checklist;
+  const saved_d = a.checklistsByMonth[monthIndex];
   document.getElementById('clFooterInfo').textContent = clReadonly
     ? 'Auditoria finalizada em ' + (saved_d?.closingDate || saved_d?.completedAt?.slice(0,10) || '?')
       + ' · Score: ' + (saved_d?.score || '—') + ' · Decisão: ' + (saved_d?.decision || '—')
@@ -3293,6 +3324,7 @@ function closeChecklist() {
   document.body.classList.remove('cl-open');
   window.scrollTo(0,0);
   clCurrentAuditId = null;
+  clCurrentMonthIndex = null;
 
   const _navCl = document.getElementById('navChecklist');
   if (_navCl) {
@@ -3312,7 +3344,8 @@ function saveChecklist() {
   if (clReadonly) return;
   const a = state.audits.find(x => x.id === clCurrentAuditId);
   if (!a) return;
-  a.checklist = _clPayload(false);
+  a.checklistsByMonth = a.checklistsByMonth || {};
+  a.checklistsByMonth[clCurrentMonthIndex] = _clPayload(false);
   saveAudits();
   notify('💾 Rascunho salvo!');
   document.getElementById('clFooterInfo').textContent = 'Rascunho salvo às ' + new Date().toLocaleTimeString('pt-BR');
@@ -3336,12 +3369,10 @@ function finalizeChecklist() {
   }
 
   const data = _clPayload(true);
-  a.checklist = data;
+  a.checklistsByMonth = a.checklistsByMonth || {};
+  a.checklistsByMonth[clCurrentMonthIndex] = data;
   a.status    = data.decision === 'Reprovado' ? 'Reprovado' : 'Aprovado';
-  if (data.date) {
-    const mi = new Date(data.date + 'T12:00:00').getMonth();
-    if (a.months && a.months[mi] > 0) a.months[mi] = 2;
-  }
+  if (a.months && a.months[clCurrentMonthIndex] > 0) a.months[clCurrentMonthIndex] = 2;
 
   saveAudits();
   state.filtered = [...state.audits];
@@ -3830,11 +3861,12 @@ function clEnableEdit(){
   if (!clCurrentAuditId) return;
   if (!confirm('Reabrir esta auditoria finalizada para edição?\n\nA pontuação e a decisão poderão ser alteradas.')) return;
   const a = state.audits.find(x => x.id === clCurrentAuditId);
-  if (!a || !a.checklist) return;
-  a.checklist.completedAt = null;
+  const savedMonth = a?.checklistsByMonth?.[clCurrentMonthIndex];
+  if (!a || !savedMonth) return;
+  savedMonth.completedAt = null;
   saveAudits();
   notify('✎ Checklist reaberto para edição');
-  openChecklist(clCurrentAuditId);
+  openChecklist(clCurrentAuditId, clCurrentMonthIndex);
 }
 
 function clClearForm(){
@@ -3885,8 +3917,9 @@ function clDeleteChecklist(){
   if (!clCurrentAuditId) return;
   const a = state.audits.find(x => x.id === clCurrentAuditId);
   if (!a) return;
-  if (!confirm('Excluir DEFINITIVAMENTE o checklist desta auditoria?\n\nTodos os dados preenchidos (' + (a.checklist?.score||'—') + ' pts) serão perdidos. Esta ação não pode ser desfeita.')) return;
-  delete a.checklist;
+  const savedMonth = a.checklistsByMonth?.[clCurrentMonthIndex];
+  if (!confirm('Excluir DEFINITIVAMENTE o checklist de ' + (MONTHS[clCurrentMonthIndex]||'') + ' desta auditoria?\n\nTodos os dados preenchidos (' + (savedMonth?.score||'—') + ' pts) serão perdidos. Esta ação não pode ser desfeita.')) return;
+  if (a.checklistsByMonth) delete a.checklistsByMonth[clCurrentMonthIndex];
   saveAudits();
   state.filtered = [...state.audits];
   filterGantt && filterGantt();
@@ -4147,7 +4180,8 @@ document.addEventListener('keydown', (e) => {
       try {
         const a = state.audits.find(x => x.id === clCurrentAuditId);
         if (!a) return;
-        a.checklist = _clPayload(false);
+        a.checklistsByMonth = a.checklistsByMonth || {};
+        a.checklistsByMonth[clCurrentMonthIndex] = _clPayload(false);
         saveAudits();
       } catch(e){ console.warn('autosave', e); }
     }, 400);
