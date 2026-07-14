@@ -1274,7 +1274,7 @@ body.cl-open{overflow:hidden;}
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-  import { getFirestore, collection, doc, setDoc, getDoc, getDocs, writeBatch, onSnapshot, serverTimestamp, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+  import { getFirestore, doc, setDoc, getDoc, getDocs, deleteDoc, collection, onSnapshot, serverTimestamp, enableIndexedDbPersistence, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyDaR94Gu9bpPaq3ajnI8iu7y3tW0r2XZmk",
@@ -1288,12 +1288,16 @@ body.cl-open{overflow:hidden;}
   const fbApp = initializeApp(firebaseConfig);
   const auth  = getAuth(fbApp);
   const db    = getFirestore(fbApp);
-  // FIX: o Firestore tem limite de 1.048.576 bytes (1 MiB) POR DOCUMENTO.
-  // Guardar as 105 auditorias (com checklists completos) em um único doc
-  // (auditoria_data/main) estourava esse limite (~1.9 MB) e toda gravação
-  // falhava silenciosamente. Agora cada auditoria é o SEU PRÓPRIO documento,
-  // dentro de uma coleção — cada item tem no máximo ~100 KB, bem abaixo do teto.
-  const COL_REF = collection(db, 'auditoria_items');
+  // LEGACY: documento monolítico antigo (auditoria_data/main). Mantido apenas
+  // para leitura única na migração automática (fallback) — nunca mais escrito.
+  const LEGACY_DOC_REF = doc(db, 'auditoria_data', 'main');
+  // NOVO: cada auditoria vira um documento próprio em auditoria_items/{id}.
+  // Isso elimina o limite físico de 1 MiB por documento do Firestore.
+  const COL_NAME  = 'auditoria_items';
+  const colRef   = () => collection(db, COL_NAME);
+  const itemRef  = (id) => doc(db, COL_NAME, String(id));
+  const _docId   = (a) => String(a && (a.id ?? a.sap));
+  const _stripMeta = (d) => { if (!d) return d; const { updatedAt, ...rest } = d; return rest; };
 
   try { enableIndexedDbPersistence(db).catch(()=>{}); } catch(e) {}
 
@@ -1329,36 +1333,95 @@ body.cl-open{overflow:hidden;}
   function _wireCloudSync() {
     window.CloudSync.ready = true;
     window.CloudSync.lastError = null;
+
+    // Salva a lista inteira de auditorias, mas AGORA um documento por auditoria
+    // dentro da coleção `auditoria_items`. Isso remove o limite de 1 MiB por doc.
+    // Estratégia: batches de até 400 setDoc (limite prático do writeBatch = 500).
     window.CloudSync.save = async function(audits) {
       try {
-        // Grava cada auditoria como seu próprio documento (evita o limite de 1 MiB),
-        // e apaga da coleção os itens que não existem mais localmente (ex: exclusão).
-        const existing = await getDocs(COL_REF);
-        const existingIds = new Set(existing.docs.map(d => d.id));
-        const newIds = new Set(audits.map(a => String(a.id)));
-        const batch = writeBatch(db);
-        audits.forEach(a => {
-          batch.set(doc(COL_REF, String(a.id)), { ...a, updatedAt: serverTimestamp() });
-        });
-        existingIds.forEach(id => { if (!newIds.has(id)) batch.delete(doc(COL_REF, id)); });
-        await batch.commit();
+        const list = Array.isArray(audits) ? audits : [];
+        const CHUNK = 400;
+        for (let i = 0; i < list.length; i += CHUNK) {
+          const batch = writeBatch(db);
+          for (const a of list.slice(i, i + CHUNK)) {
+            batch.set(itemRef(_docId(a)), { ...a, updatedAt: serverTimestamp() });
+          }
+          await batch.commit();
+        }
         return true;
-      } catch (e) { console.warn('Firestore save error:', e); window.CloudSync.lastError = _friendlyError(e); return false; }
+      } catch (e) {
+        console.warn('Firestore save error:', e);
+        window.CloudSync.lastError = _friendlyError(e);
+        return false;
+      }
     };
+
+    // Salva UMA auditoria isolada (útil para edições pontuais).
+    window.CloudSync.saveOne = async function(a) {
+      try {
+        await setDoc(itemRef(_docId(a)), { ...a, updatedAt: serverTimestamp() });
+        return true;
+      } catch (e) {
+        console.warn('Firestore saveOne error:', e);
+        window.CloudSync.lastError = _friendlyError(e);
+        return false;
+      }
+    };
+
+    // Exclusão real no Firestore (evita que o item volte via onSnapshot).
+    window.CloudSync.deleteOne = async function(id) {
+      try { await deleteDoc(itemRef(id)); return true; }
+      catch (e) {
+        console.warn('Firestore delete error:', e);
+        window.CloudSync.lastError = _friendlyError(e);
+        return false;
+      }
+    };
+
+    // Leitura inicial: lê a coleção nova; se estiver vazia E existir o doc antigo
+    // (auditoria_data/main), migra automaticamente cada item para a nova coleção
+    // e passa a operar apenas no modelo novo. Sem perda de dados históricos.
     window.CloudSync.loadOnce = async function() {
       try {
-        const snap = await getDocs(COL_REF);
-        if (snap.empty) return null;
-        return snap.docs.map(d => d.data());
-      } catch (e) { console.warn('Firestore load error:', e); window.CloudSync.lastError = _friendlyError(e); return null; }
+        const snap = await getDocs(colRef());
+        if (!snap.empty) {
+          return snap.docs.map(d => _stripMeta(d.data()));
+        }
+        const legacy = await getDoc(LEGACY_DOC_REF);
+        if (legacy.exists()) {
+          const list = (legacy.data() && legacy.data().audits) || [];
+          if (Array.isArray(list) && list.length) {
+            console.log('[CloudSync] Migrando', list.length, 'auditorias do doc legado para auditoria_items…');
+            const CHUNK = 400;
+            for (let i = 0; i < list.length; i += CHUNK) {
+              const batch = writeBatch(db);
+              for (const a of list.slice(i, i + CHUNK)) {
+                batch.set(itemRef(_docId(a)), { ...a, updatedAt: serverTimestamp() });
+              }
+              await batch.commit();
+            }
+            console.log('[CloudSync] Migração concluída.');
+          }
+          return list;
+        }
+        return null;
+      } catch (e) {
+        console.warn('Firestore load error:', e);
+        window.CloudSync.lastError = _friendlyError(e);
+        return null;
+      }
     };
+
     let _lastOnChange = null;
+    // Listener em tempo real da coleção inteira. Reconstrói a array global
+    // mapeando cada documento de volta ao formato que o resto do app espera.
     window.CloudSync.subscribe = function(onChange) {
       _lastOnChange = onChange;
       if (_unsub) _unsub();
-      _unsub = onSnapshot(COL_REF, snap => {
+      _unsub = onSnapshot(colRef(), snap => {
         _applyingRemote = true;
-        try { onChange(snap.docs.map(d => d.data())); } finally { _applyingRemote = false; }
+        try { onChange(snap.docs.map(d => _stripMeta(d.data()))); }
+        finally { _applyingRemote = false; }
       }, err => {
         console.warn('Firestore snapshot error:', err);
         window.CloudSync.lastError = _friendlyError(err);
@@ -2026,7 +2089,13 @@ function saveEdit() {
 
 function deleteAudit() {
   if (!confirm('Excluir esta auditoria permanentemente?')) return;
-  state.audits = state.audits.filter(a => a.id !== state.currentEditId);
+  const _deletedId = state.currentEditId;
+  state.audits = state.audits.filter(a => a.id !== _deletedId);
+  // Remove o doc correspondente na coleção auditoria_items — senão o
+  // onSnapshot da coleção repõe o item na tela ao reiniciar/reconectar.
+  if (window.CloudSync && window.CloudSync.ready && window.CloudSync.deleteOne) {
+    window.CloudSync.deleteOne(_deletedId).catch(() => {});
+  }
   saveAudits();
   state.filtered = [...state.audits];
   updateFilterOptions();
@@ -2661,14 +2730,8 @@ async function applyImport(mode) {
 // Verifica, alguns segundos depois de um restore/import em lote, se o documento
 // no Firestore ainda bate com o que acabamos de gravar. Se não bater (outra aba/
 // sessão ou uma escrita offline enfileirada sobrescreveu por cima), regrava e avisa.
-function _stripSyncFields(list) {
-  return (list || []).map(a => { const { updatedAt, ...rest } = a; return rest; })
-    .sort((a,b) => String(a.sap).localeCompare(String(b.sap)));
-}
-
 function _verifyWriteSettled(expectedList, label) {
   if (!(window.CloudSync && window.CloudSync.ready)) return;
-  const expectedNorm = JSON.stringify(_stripSyncFields(expectedList));
   const delays = [2500, 6000, 12000]; // checa em 3 momentos ao longo de ~12s
   delays.forEach(ms => {
     setTimeout(async () => {
@@ -2676,7 +2739,7 @@ function _verifyWriteSettled(expectedList, label) {
         const remote = await window.CloudSync.loadOnce();
         const same = Array.isArray(remote) &&
                      remote.length === expectedList.length &&
-                     JSON.stringify(_stripSyncFields(remote)) === expectedNorm;
+                     JSON.stringify(remote) === JSON.stringify(expectedList);
         if (!same) {
           console.warn(`[${label}] Documento no Firestore não bate com o que foi gravado (checagem em ${ms}ms) — outra escrita concorrente detectada. Regravando...`);
           await window.CloudSync.save(expectedList);
