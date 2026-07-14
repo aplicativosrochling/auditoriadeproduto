@@ -2156,6 +2156,7 @@ function importBackupJSON(file) {
         setCloudStatus('offline');
       }
       if (window.CloudSync && window.CloudSync.resume) window.CloudSync.resume();
+      _verifyWriteSettled(list, 'Restaurar Backup');
 
       notify(`✅ ${list.length} auditorias restauradas do backup!`);
       closeImportModal();
@@ -2634,11 +2635,32 @@ async function applyImport(mode) {
     setCloudStatus('offline');
   }
   if (window.CloudSync && window.CloudSync.resume) window.CloudSync.resume();
+  _verifyWriteSettled(state.audits, 'Importar Excel');
 
   closeImportModal();
 }
 
 // ===== PERSISTÊNCIA =====
+// Verifica, alguns segundos depois de um restore/import em lote, se o documento
+// no Firestore ainda bate com o que acabamos de gravar. Se não bater (outra aba/
+// sessão ou uma escrita offline enfileirada sobrescreveu por cima), regrava e avisa.
+function _verifyWriteSettled(expectedList, label) {
+  if (!(window.CloudSync && window.CloudSync.ready)) return;
+  setTimeout(async () => {
+    try {
+      const remote = await window.CloudSync.loadOnce();
+      const same = Array.isArray(remote) &&
+                   remote.length === expectedList.length &&
+                   JSON.stringify(remote) === JSON.stringify(expectedList);
+      if (!same) {
+        console.warn(`[${label}] Documento no Firestore não bate com o que foi gravado — outra escrita concorrente detectada. Regravando...`);
+        await window.CloudSync.save(expectedList);
+        notify('⚠️ Detectada outra sessão/aba gravando ao mesmo tempo. Dados reafirmados — feche outras abas deste app.', 'warn');
+      }
+    } catch (e) { console.warn('Falha ao verificar consistência pós-restore:', e); }
+  }, 2500);
+}
+
 function saveAudits() {
   setCloudStatus('saving');
   // cache local imediato (garante que nada se perde mesmo offline)
