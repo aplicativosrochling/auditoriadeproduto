@@ -2646,19 +2646,29 @@ async function applyImport(mode) {
 // sessão ou uma escrita offline enfileirada sobrescreveu por cima), regrava e avisa.
 function _verifyWriteSettled(expectedList, label) {
   if (!(window.CloudSync && window.CloudSync.ready)) return;
-  setTimeout(async () => {
-    try {
-      const remote = await window.CloudSync.loadOnce();
-      const same = Array.isArray(remote) &&
-                   remote.length === expectedList.length &&
-                   JSON.stringify(remote) === JSON.stringify(expectedList);
-      if (!same) {
-        console.warn(`[${label}] Documento no Firestore não bate com o que foi gravado — outra escrita concorrente detectada. Regravando...`);
-        await window.CloudSync.save(expectedList);
-        notify('⚠️ Detectada outra sessão/aba gravando ao mesmo tempo. Dados reafirmados — feche outras abas deste app.', 'warn');
-      }
-    } catch (e) { console.warn('Falha ao verificar consistência pós-restore:', e); }
-  }, 2500);
+  const delays = [2500, 6000, 12000]; // checa em 3 momentos ao longo de ~12s
+  delays.forEach(ms => {
+    setTimeout(async () => {
+      try {
+        const remote = await window.CloudSync.loadOnce();
+        const same = Array.isArray(remote) &&
+                     remote.length === expectedList.length &&
+                     JSON.stringify(remote) === JSON.stringify(expectedList);
+        if (!same) {
+          console.warn(`[${label}] Documento no Firestore não bate com o que foi gravado (checagem em ${ms}ms) — outra escrita concorrente detectada. Regravando...`);
+          await window.CloudSync.save(expectedList);
+          state.audits   = expectedList;
+          state.filtered = [...state.audits];
+          try { localStorage.setItem('audits_t1_cache', JSON.stringify(state.audits)); } catch(e) {}
+          updateFilterOptions();
+          renderMetrics();
+          renderCharts();
+          renderGantt();
+          notify('⚠️ Detectada outra sessão/aba gravando ao mesmo tempo. Dados reafirmados — feche outras abas deste app.', 'warn');
+        }
+      } catch (e) { console.warn('Falha ao verificar consistência pós-restore:', e); }
+    }, ms);
+  });
 }
 
 function saveAudits() {
