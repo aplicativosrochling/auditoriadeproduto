@@ -1274,7 +1274,7 @@ body.cl-open{overflow:hidden;}
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-  import { getFirestore, doc, setDoc, getDoc, onSnapshot, serverTimestamp, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+  import { getFirestore, collection, doc, setDoc, getDoc, getDocs, writeBatch, onSnapshot, serverTimestamp, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyDaR94Gu9bpPaq3ajnI8iu7y3tW0r2XZmk",
@@ -1288,7 +1288,12 @@ body.cl-open{overflow:hidden;}
   const fbApp = initializeApp(firebaseConfig);
   const auth  = getAuth(fbApp);
   const db    = getFirestore(fbApp);
-  const DOC_REF = doc(db, 'auditoria_data', 'main');
+  // FIX: o Firestore tem limite de 1.048.576 bytes (1 MiB) POR DOCUMENTO.
+  // Guardar as 105 auditorias (com checklists completos) em um único doc
+  // (auditoria_data/main) estourava esse limite (~1.9 MB) e toda gravação
+  // falhava silenciosamente. Agora cada auditoria é o SEU PRÓPRIO documento,
+  // dentro de uma coleção — cada item tem no máximo ~100 KB, bem abaixo do teto.
+  const COL_REF = collection(db, 'auditoria_items');
 
   try { enableIndexedDbPersistence(db).catch(()=>{}); } catch(e) {}
 
@@ -1325,23 +1330,35 @@ body.cl-open{overflow:hidden;}
     window.CloudSync.ready = true;
     window.CloudSync.lastError = null;
     window.CloudSync.save = async function(audits) {
-      try { await setDoc(DOC_REF, { audits, updatedAt: serverTimestamp() }); return true; }
-      catch (e) { console.warn('Firestore save error:', e); window.CloudSync.lastError = _friendlyError(e); return false; }
+      try {
+        // Grava cada auditoria como seu próprio documento (evita o limite de 1 MiB),
+        // e apaga da coleção os itens que não existem mais localmente (ex: exclusão).
+        const existing = await getDocs(COL_REF);
+        const existingIds = new Set(existing.docs.map(d => d.id));
+        const newIds = new Set(audits.map(a => String(a.id)));
+        const batch = writeBatch(db);
+        audits.forEach(a => {
+          batch.set(doc(COL_REF, String(a.id)), { ...a, updatedAt: serverTimestamp() });
+        });
+        existingIds.forEach(id => { if (!newIds.has(id)) batch.delete(doc(COL_REF, id)); });
+        await batch.commit();
+        return true;
+      } catch (e) { console.warn('Firestore save error:', e); window.CloudSync.lastError = _friendlyError(e); return false; }
     };
     window.CloudSync.loadOnce = async function() {
       try {
-        const snap = await getDoc(DOC_REF);
-        return snap.exists() ? (snap.data().audits || null) : null;
+        const snap = await getDocs(COL_REF);
+        if (snap.empty) return null;
+        return snap.docs.map(d => d.data());
       } catch (e) { console.warn('Firestore load error:', e); window.CloudSync.lastError = _friendlyError(e); return null; }
     };
     let _lastOnChange = null;
     window.CloudSync.subscribe = function(onChange) {
       _lastOnChange = onChange;
       if (_unsub) _unsub();
-      _unsub = onSnapshot(DOC_REF, snap => {
-        if (!snap.exists()) return;
+      _unsub = onSnapshot(COL_REF, snap => {
         _applyingRemote = true;
-        try { onChange(snap.data().audits || []); } finally { _applyingRemote = false; }
+        try { onChange(snap.docs.map(d => d.data())); } finally { _applyingRemote = false; }
       }, err => {
         console.warn('Firestore snapshot error:', err);
         window.CloudSync.lastError = _friendlyError(err);
@@ -2644,8 +2661,14 @@ async function applyImport(mode) {
 // Verifica, alguns segundos depois de um restore/import em lote, se o documento
 // no Firestore ainda bate com o que acabamos de gravar. Se não bater (outra aba/
 // sessão ou uma escrita offline enfileirada sobrescreveu por cima), regrava e avisa.
+function _stripSyncFields(list) {
+  return (list || []).map(a => { const { updatedAt, ...rest } = a; return rest; })
+    .sort((a,b) => String(a.sap).localeCompare(String(b.sap)));
+}
+
 function _verifyWriteSettled(expectedList, label) {
   if (!(window.CloudSync && window.CloudSync.ready)) return;
+  const expectedNorm = JSON.stringify(_stripSyncFields(expectedList));
   const delays = [2500, 6000, 12000]; // checa em 3 momentos ao longo de ~12s
   delays.forEach(ms => {
     setTimeout(async () => {
@@ -2653,7 +2676,7 @@ function _verifyWriteSettled(expectedList, label) {
         const remote = await window.CloudSync.loadOnce();
         const same = Array.isArray(remote) &&
                      remote.length === expectedList.length &&
-                     JSON.stringify(remote) === JSON.stringify(expectedList);
+                     JSON.stringify(_stripSyncFields(remote)) === expectedNorm;
         if (!same) {
           console.warn(`[${label}] Documento no Firestore não bate com o que foi gravado (checagem em ${ms}ms) — outra escrita concorrente detectada. Regravando...`);
           await window.CloudSync.save(expectedList);
