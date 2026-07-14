@@ -1334,7 +1334,9 @@ body.cl-open{overflow:hidden;}
         return snap.exists() ? (snap.data().audits || null) : null;
       } catch (e) { console.warn('Firestore load error:', e); window.CloudSync.lastError = _friendlyError(e); return null; }
     };
+    let _lastOnChange = null;
     window.CloudSync.subscribe = function(onChange) {
+      _lastOnChange = onChange;
       if (_unsub) _unsub();
       _unsub = onSnapshot(DOC_REF, snap => {
         if (!snap.exists()) return;
@@ -1346,6 +1348,11 @@ body.cl-open{overflow:hidden;}
         if (typeof window.onCloudSyncLost === 'function') window.onCloudSyncLost();
       });
     };
+    // Pausa/retoma o listener em tempo real. Usado por operações em lote (restaurar
+    // backup, importar planilha) para que um snapshot antigo não sobrescreva os dados
+    // recém-gravados antes de o novo doc ser confirmado no servidor.
+    window.CloudSync.pause = function() { if (_unsub) { _unsub(); _unsub = null; } };
+    window.CloudSync.resume = function() { if (_lastOnChange) window.CloudSync.subscribe(_lastOnChange); };
     window.CloudSync.isApplyingRemote = () => _applyingRemote;
   }
 
@@ -2122,18 +2129,34 @@ function importBackupJSON(file) {
   if (!file) return;
   if (!confirm(`Restaurar backup "${file.name}"?\n\nTODAS as auditorias atuais serão SUBSTITUÍDAS pelo conteúdo do arquivo.\n\nDeseja continuar?`)) return;
   const reader = new FileReader();
-  reader.onload = function(e) {
+  reader.onload = async function(e) {
     try {
       const data = JSON.parse(e.target.result);
       const list = Array.isArray(data) ? data : data.audits;
       if (!list || !list.length) { notify('Arquivo JSON inválido','error'); return; }
+
+      // Pausa o listener em tempo real ANTES de mexer no estado, grava direto
+      // (sem o debounce de 600ms do saveAudits) e só religa depois de confirmado —
+      // evita que um snapshot antigo chegue no meio do caminho e reverta o restore.
+      if (window.CloudSync && window.CloudSync.pause) window.CloudSync.pause();
+
       state.audits   = list;
       state.filtered = [...state.audits];
-      saveAudits();
+      try { localStorage.setItem('audits_t1_cache', JSON.stringify(state.audits)); } catch(err) {}
       updateFilterOptions();
       renderMetrics();
       renderCharts();
       renderGantt();
+
+      if (window.CloudSync && window.CloudSync.ready && window.CloudSync.save) {
+        setCloudStatus('saving');
+        const ok = await window.CloudSync.save(state.audits);
+        setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync.lastError);
+      } else {
+        setCloudStatus('offline');
+      }
+      if (window.CloudSync && window.CloudSync.resume) window.CloudSync.resume();
+
       notify(`✅ ${list.length} auditorias restauradas do backup!`);
       closeImportModal();
     } catch(e) { notify('Erro ao ler JSON: ' + e.message, 'error'); }
@@ -2573,7 +2596,7 @@ function parseWorkbook(wb) {
   setImportProgress(100, '✅ Pronto para aplicar!');
 }
 
-function applyImport(mode) {
+async function applyImport(mode) {
   if (!state_importedAudits.length) return;
   if (mode === 'replace') {
     state.audits = state_importedAudits;
@@ -2594,11 +2617,24 @@ function applyImport(mode) {
     notify(`✅ ${added} adicionadas · ${upd} atualizadas`);
   }
   state.filtered = [...state.audits];
-  saveAudits();
+  try { localStorage.setItem('audits_t1_cache', JSON.stringify(state.audits)); } catch(e) {}
   updateFilterOptions();
   renderMetrics();
   renderCharts();
   renderGantt();
+
+  // Mesma proteção do restore: pausa o listener, grava direto (sem debounce),
+  // religa só depois de confirmado — evita reversão por snapshot antigo.
+  if (window.CloudSync && window.CloudSync.pause) window.CloudSync.pause();
+  if (window.CloudSync && window.CloudSync.ready && window.CloudSync.save) {
+    setCloudStatus('saving');
+    const ok = await window.CloudSync.save(state.audits);
+    setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync.lastError);
+  } else {
+    setCloudStatus('offline');
+  }
+  if (window.CloudSync && window.CloudSync.resume) window.CloudSync.resume();
+
   closeImportModal();
 }
 
