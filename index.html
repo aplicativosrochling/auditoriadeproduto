@@ -797,7 +797,11 @@ body.cl-open{overflow:hidden;}
       <div class="import-dropzone" id="importDropzone"
            ondragover="event.preventDefault();this.classList.add('drag-over')"
            ondragleave="this.classList.remove('drag-over')"
-           ondrop="event.preventDefault();this.classList.remove('drag-over');handleImportFile(event.dataTransfer.files[0])">
+           ondrop="event.preventDefault();this.classList.remove('drag-over');
+             (function(f){ if(!f) return;
+               var ext=(f.name.split('.').pop()||'').toLowerCase();
+               if (ext==='json') { importBackupJSON(f); } else { handleImportFile(f); }
+             })(event.dataTransfer.files[0])">
         <input type="file" id="importFileInput" style="display:none"
                accept=".xlsx,.xlsm,.xls,.csv"
                onchange="handleImportFile(this.files[0])">
@@ -2116,6 +2120,7 @@ function exportBackupJSON() {
 
 function importBackupJSON(file) {
   if (!file) return;
+  if (!confirm(`Restaurar backup "${file.name}"?\n\nTODAS as auditorias atuais serão SUBSTITUÍDAS pelo conteúdo do arquivo.\n\nDeseja continuar?`)) return;
   const reader = new FileReader();
   reader.onload = function(e) {
     try {
@@ -2682,7 +2687,9 @@ function _clMigrateLegacy(a) {
     const d = new Date(a.checklist.date + 'T12:00:00');
     if (!isNaN(d)) mi = d.getMonth();
   }
-  if (mi == null || !(a.months && a.months[mi] > 0)) {
+  // Prioriza a data real gravada no checklist. Só recorre à adivinhação
+  // (primeiro mês ativo em `months`) quando não há data alguma no checklist.
+  if (mi == null) {
     mi = a.months ? a.months.findIndex(v => v > 0) : -1;
     if (mi < 0) mi = new Date().getMonth();
   }
