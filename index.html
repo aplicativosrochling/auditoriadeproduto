@@ -2220,7 +2220,7 @@ function toggleMonth(id, month) {
   const a = state.audits.find(a => a.id === id);
   if (a) {
     a.months[month] = (a.months[month]+1) % 5;
-    saveAudits();
+    saveAudits(id);
     state.filtered = [...state.audits];
     filterGantt();
     renderMetrics();
@@ -2263,7 +2263,7 @@ function saveNew() {
     status: document.getElementById('nStatus').value,
     obs:    document.getElementById('nObs').value.trim(),
   });
-  saveAudits();
+  saveAudits(newId);
   state.filtered = [...state.audits];
   updateFilterOptions();
   filterGantt();
@@ -2305,7 +2305,7 @@ function saveEdit() {
   a.status = document.getElementById('eStatus').value;
   a.obs    = document.getElementById('eObs').value.trim();
   a.months = getMonths('e');
-  saveAudits();
+  saveAudits(a.id);
   state.filtered = [...state.audits];
   updateFilterOptions();
   filterGantt();
@@ -3094,7 +3094,20 @@ function _verifyWriteSettled(expectedList, label, useReplaceAll) {
   });
 }
 
-function saveAudits() {
+// BUGFIX GRAVE: antes, TODA chamada a saveAudits() reescrevia as auditorias
+// INTEIRAS no Firestore (mesmo quando só um campo de uma auditoria mudou).
+// Com o autosave do checklist disparando a cada pausa de digitação, isso
+// gerava uma enxurrada de escritas repetidas — e com a coleção crescendo
+// (100+ auditorias), o Firestore chegou a recusar com
+// "resource-exhausted: Write stream exhausted maximum allowed queued writes".
+// Agora rastreamos só os IDs que realmente mudaram (_dirtyAuditIds) e
+// gravamos apenas esses documentos. Importação/restauração de backup não
+// passam por aqui — usam window.CloudSync.save()/replaceAll() diretamente
+// com a lista completa, o que continua correto pra esses casos.
+const _dirtyAuditIds = new Set();
+
+function saveAudits(changedId) {
+  if (changedId != null) _dirtyAuditIds.add(changedId);
   setCloudStatus('saving');
   // cache local imediato (garante que nada se perde mesmo offline)
   try { localStorage.setItem('audits_t1_cache', JSON.stringify(state.audits)); } catch(e) {}
@@ -3107,8 +3120,17 @@ function saveAudits() {
       setCloudStatus('synced');
       return;
     }
+    const idsToSave = [..._dirtyAuditIds];
+    _dirtyAuditIds.clear();
+    if (!idsToSave.length) {
+      // Nada marcado como alterado (ex.: só uma exclusão, já tratada via
+      // CloudSync.deleteOne em deleteAudit()) — não precisa gravar nada.
+      setCloudStatus('synced');
+      return;
+    }
+    const toSave = state.audits.filter(a => idsToSave.includes(a.id));
     if (window.CloudSync && window.CloudSync.ready && window.CloudSync.save) {
-      const ok = await window.CloudSync.save(state.audits);
+      const ok = await window.CloudSync.save(toSave);
       setCloudStatus(ok ? 'synced' : 'error');
     } else {
       // Sem conexão com o Firebase: fica salvo só localmente neste navegador
@@ -4063,7 +4085,7 @@ function saveChecklist() {
   if (!a) return;
   a.checklistsByMonth = a.checklistsByMonth || {};
   a.checklistsByMonth[clCurrentMonthIndex] = _clPayload(false);
-  saveAudits();
+  saveAudits(a.id);
   notify('💾 Rascunho salvo!');
   document.getElementById('clFooterInfo').textContent = 'Rascunho salvo às ' + new Date().toLocaleTimeString('pt-BR');
 }
@@ -4091,7 +4113,7 @@ function finalizeChecklist() {
   a.status    = data.decision === 'Reprovado' ? 'Reprovado' : 'Aprovado';
   if (a.months && a.months[clCurrentMonthIndex] > 0) a.months[clCurrentMonthIndex] = 2;
 
-  saveAudits();
+  saveAudits(a.id);
   state.filtered = [...state.audits];
   filterGantt();
   renderMetrics();
@@ -4581,7 +4603,7 @@ function clEnableEdit(){
   const savedMonth = a?.checklistsByMonth?.[clCurrentMonthIndex];
   if (!a || !savedMonth) return;
   savedMonth.completedAt = null;
-  saveAudits();
+  saveAudits(a.id);
   notify('✎ Checklist reaberto para edição');
   openChecklist(clCurrentAuditId, clCurrentMonthIndex);
 }
@@ -4637,7 +4659,7 @@ function clDeleteChecklist(){
   const savedMonth = a.checklistsByMonth?.[clCurrentMonthIndex];
   if (!confirm('Excluir DEFINITIVAMENTE o checklist de ' + (MONTHS[clCurrentMonthIndex]||'') + ' desta auditoria?\n\nTodos os dados preenchidos (' + (savedMonth?.score||'—') + ' pts) serão perdidos. Esta ação não pode ser desfeita.')) return;
   if (a.checklistsByMonth) delete a.checklistsByMonth[clCurrentMonthIndex];
-  saveAudits();
+  saveAudits(a.id);
   state.filtered = [...state.audits];
   filterGantt && filterGantt();
   renderMetrics && renderMetrics();
@@ -4912,7 +4934,7 @@ document.addEventListener('keydown', (e) => {
         if (!a) return;
         a.checklistsByMonth = a.checklistsByMonth || {};
         a.checklistsByMonth[clCurrentMonthIndex] = _clPayload(false);
-        saveAudits();
+        saveAudits(a.id);
       } catch(e){ console.warn('autosave', e); }
     }, 400);
   });
