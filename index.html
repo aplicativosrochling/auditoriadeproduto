@@ -2096,9 +2096,20 @@ function applyChartFilter(filterType, value, extraFilter) {
 function updateFilterOptions() {
   const clients  = [...new Set(state.audits.map(a => a.client))].sort();
   const families = [...new Set(state.audits.map(a => a.family).filter(Boolean))].sort();
-  document.getElementById('clientFilter').innerHTML = '<option value="">Todos Clientes</option>' + clients.map(c => `<option>${c}</option>`).join('');
+
+  const clEl = document.getElementById('clientFilter');
+  if (clEl) {
+    const cur = clEl.value;
+    clEl.innerHTML = '<option value="">Todos Clientes</option>' + clients.map(c => `<option>${c}</option>`).join('');
+    if (cur && clients.includes(cur)) clEl.value = cur;
+  }
+
   const ff = document.getElementById('familyFilter');
-  if (ff) ff.innerHTML = '<option value="">Todas Famílias</option>' + families.map(f => `<option>${f}</option>`).join('');
+  if (ff) {
+    const cur = ff.value;
+    ff.innerHTML = '<option value="">Todas Famílias</option>' + families.map(f => `<option>${f}</option>`).join('');
+    if (cur && families.includes(cur)) ff.value = cur;
+  }
 }
 
 function filterGantt() {
@@ -3119,12 +3130,17 @@ function applyRemoteAudits(audits) {
   if (!Array.isArray(audits)) return;
   _markCloudSyncedOnce();
   state.audits = audits;
-  state.filtered = [...state.audits];
   try { localStorage.setItem('audits_t1_cache', JSON.stringify(state.audits)); } catch(e) {}
   updateFilterOptions();
-  renderMetrics();
+  // BUGFIX: antes disto fazia state.filtered = [...state.audits] (mostrando TODAS
+  // as auditorias) sempre que os dados chegavam da nuvem — o que acontece a cada
+  // save() (inclusive o seu próprio, que "ecoa" de volta pelo listener em tempo
+  // real do Firestore). Resultado: ao finalizar um checklist com um filtro ativo
+  // no Cronograma, a lista voltava a mostrar tudo, como se o filtro tivesse sido
+  // perdido. filterGantt() reaplica os filtros que já estão selecionados na tela
+  // em vez de descartá-los.
+  filterGantt();
   renderCharts();
-  renderGantt();
   setCloudStatus('synced');
 }
 
