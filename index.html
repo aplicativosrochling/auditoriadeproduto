@@ -491,6 +491,26 @@ body.cl-open{overflow:hidden;}
 <body>
 <div class="loading" id="loading"><div class="spinner"></div><span id="loadingMsg">Carregando...</span></div>
 
+<!-- Tela de login: fica por cima de tudo até o usuário autenticar com e-mail/senha.
+     A restrição de acesso "de verdade" acontece nas regras do Firestore (só
+     e-mails da lista permitida conseguem ler/escrever); esta tela é a porta
+     de entrada para conseguir esse login. -->
+<div class="modal-overlay active" id="loginOverlay" style="z-index:5000;">
+  <div class="modal" style="max-width:380px;">
+    <div style="padding:32px 28px 8px;text-align:center;">
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:20px;background:var(--grad,linear-gradient(135deg,#00c6ff,#7b61ff));-webkit-background-clip:text;background-clip:text;color:transparent;">ROCHLING AUTOMOTIVE</div>
+      <div style="font-size:11px;color:var(--text-secondary);letter-spacing:1px;margin-top:2px;">PRODUCT AUDIT — LOGIN</div>
+    </div>
+    <div style="padding:20px 28px 28px;display:flex;flex-direction:column;gap:12px;">
+      <input class="form-input" id="loginEmail" type="email" placeholder="E-mail" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPassword').focus();">
+      <input class="form-input" id="loginPassword" type="password" placeholder="Senha" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin();">
+      <div id="loginError" style="display:none;color:var(--danger);font-size:12px;padding:2px 2px;"></div>
+      <button class="btn btn-primary" style="width:100%;margin-top:4px;" onclick="doLogin()" id="loginBtn">Entrar</button>
+      <div style="font-size:11px;color:var(--text-secondary);text-align:center;margin-top:4px;">Acesso restrito. Fale com o administrador do sistema caso não tenha uma conta.</div>
+    </div>
+  </div>
+</div>
+
 <div class="app">
 <aside class="sidebar">
   <div class="sidebar-logo">
@@ -517,12 +537,29 @@ body.cl-open{overflow:hidden;}
     </div>
   </nav>
   <div class="sidebar-footer">
+    <div id="loggedUserBox" style="display:none;font-size:11px;text-align:center;margin-bottom:8px;color:var(--text-secondary);">
+      <span id="loggedUserEmail"></span>
+      <a href="javascript:void(0)" onclick="doLogout()" style="color:var(--accent);margin-left:6px;">Sair</a>
+    </div>
     <div id="cloudStatus" onclick="retryCloudSync()" style="font-size:11px;text-align:center;margin-bottom:10px;padding:7px 10px;background:var(--card);border-radius:9px;border:1px solid var(--border);">
       ☁️ Conectando...
     </div>
     <button class="theme-toggle" onclick="toggleTheme()">
       <span id="themeIcon">🌙</span><span>Tema</span>
     </button>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button id="autoBackupBtn" class="theme-toggle" style="flex:1;font-size:11px;padding:8px 6px;" onclick="toggleAutoBackup()" title="Backup automático desativado — clique para ativar">
+        <span id="autoBackupIcon">🗄️</span><span>Auto-backup</span>
+      </button>
+      <!-- Botão escondido de propósito: verificação manual da conexão com o Firebase.
+           Fica "invisível" ao lado do botão de Tema (só aparece bem de leve ao passar
+           o mouse por cima), pra você conseguir testar a conexão sem que apareça um
+           botão visível pra qualquer usuário do sistema. -->
+      <button id="hiddenSyncCheckBtn" onclick="testFirebaseConnection()" title="Verificar conexão com o Firebase"
+        style="width:34px;flex:0 0 34px;border:1px solid transparent;background:transparent;color:transparent;border-radius:9px;cursor:pointer;transition:all .15s;font-size:14px;"
+        onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--border)';"
+        onmouseout="this.style.color='transparent';this.style.borderColor='transparent';">🛰️</button>
+    </div>
   </div>
 </aside>
 
@@ -1273,7 +1310,7 @@ body.cl-open{overflow:hidden;}
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import { getFirestore, doc, setDoc, getDoc, getDocs, deleteDoc, collection, onSnapshot, serverTimestamp, enableIndexedDbPersistence, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -1308,14 +1345,11 @@ body.cl-open{overflow:hidden;}
   // Traduz erros técnicos do Firebase em mensagens que explicam a causa provável
   function _friendlyError(e) {
     const code = (e && e.code) || '';
-    if (code.includes('auth/operation-not-allowed') || code.includes('auth/admin-restricted-operation')) {
-      return 'Login anônimo desativado (Firebase > Authentication > Método de login).';
-    }
     if (code.includes('auth/unauthorized-domain')) {
       return 'Domínio não autorizado (Firebase > Authentication > Configurações > Domínios autorizados).';
     }
     if (code.includes('permission-denied')) {
-      return 'Regras do Firestore bloquearam o acesso (Firebase > Firestore > Regras).';
+      return 'Regras do Firestore bloquearam o acesso (Firebase > Firestore > Regras) — verifique se este e-mail está na lista permitida.';
     }
     if (code.includes('network-request-failed') || code.includes('unavailable') || code.includes('auth/network-request-failed')) {
       return 'Sem conexão com os servidores do Firebase (verifique internet/firewall/extensões).';
@@ -1323,12 +1357,28 @@ body.cl-open{overflow:hidden;}
     return (e && (e.message || e.code)) || 'Erro desconhecido ao conectar à nuvem.';
   }
 
-  function _authOnce() {
-    return new Promise((resolve, reject) => {
-      const off = onAuthStateChanged(auth, user => { if (user) { off(); resolve(user); } });
-      signInAnonymously(auth).catch(reject);
-    });
+  // Traduz erros de LOGIN (e-mail/senha) especificamente, pra mostrar na tela de login
+  function _friendlyAuthError(e) {
+    const code = (e && e.code) || '';
+    if (code.includes('auth/invalid-credential') || code.includes('auth/wrong-password') || code.includes('auth/user-not-found')) {
+      return 'E-mail ou senha incorretos.';
+    }
+    if (code.includes('auth/invalid-email')) return 'E-mail inválido.';
+    if (code.includes('auth/too-many-requests')) return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
+    if (code.includes('auth/user-disabled')) return 'Esta conta foi desativada. Fale com o administrador.';
+    if (code.includes('auth/network-request-failed')) return 'Sem conexão com os servidores do Firebase.';
+    return (e && e.message) || 'Erro ao entrar.';
   }
+
+  window.CloudSync.login = function(email, password) {
+    return signInWithEmailAndPassword(auth, email, password)
+      .then(() => ({ ok: true }))
+      .catch(e => ({ ok: false, error: _friendlyAuthError(e) }));
+  };
+
+  window.CloudSync.logout = function() {
+    return signOut(auth).catch(e => console.warn('Erro ao sair:', e));
+  };
 
   function _wireCloudSync() {
     window.CloudSync.ready = true;
@@ -1351,6 +1401,42 @@ body.cl-open{overflow:hidden;}
         return true;
       } catch (e) {
         console.warn('Firestore save error:', e);
+        window.CloudSync.lastError = _friendlyError(e);
+        return false;
+      }
+    };
+
+    // BUGFIX: restaurar um backup ou "substituir tudo" na importação de Excel
+    // trocava state.audits pela lista nova e chamava apenas save(), que só faz
+    // setDoc (criar/atualizar) — nunca apagava do Firestore os documentos de
+    // auditorias que não estavam mais na lista nova. Resultado: o onSnapshot
+    // em tempo real devolvia os itens "antigos" de volta à tela logo em
+    // seguida, como se a restauração não tivesse funcionado. replaceAll()
+    // primeiro apaga da coleção tudo que não está na nova lista e só então
+    // grava a lista nova, mantendo o Firestore e a tela realmente em sincronia.
+    window.CloudSync.replaceAll = async function(list) {
+      try {
+        const newList = Array.isArray(list) ? list : [];
+        const newIds  = new Set(newList.map(_docId));
+        const snap    = await getDocs(colRef());
+        const toDelete = snap.docs.filter(d => !newIds.has(d.id));
+        const CHUNK = 400;
+
+        for (let i = 0; i < toDelete.length; i += CHUNK) {
+          const batch = writeBatch(db);
+          for (const d of toDelete.slice(i, i + CHUNK)) batch.delete(d.ref);
+          await batch.commit();
+        }
+        for (let i = 0; i < newList.length; i += CHUNK) {
+          const batch = writeBatch(db);
+          for (const a of newList.slice(i, i + CHUNK)) {
+            batch.set(itemRef(_docId(a)), { ...a, updatedAt: serverTimestamp() });
+          }
+          await batch.commit();
+        }
+        return true;
+      } catch (e) {
+        console.warn('Firestore replaceAll error:', e);
         window.CloudSync.lastError = _friendlyError(e);
         return false;
       }
@@ -1383,6 +1469,7 @@ body.cl-open{overflow:hidden;}
     // e passa a operar apenas no modelo novo. Sem perda de dados históricos.
     window.CloudSync.loadOnce = async function() {
       try {
+        window.CloudSync.lastErrorCode = '';
         const snap = await getDocs(colRef());
         if (!snap.empty) {
           return snap.docs.map(d => _stripMeta(d.data()));
@@ -1408,6 +1495,7 @@ body.cl-open{overflow:hidden;}
       } catch (e) {
         console.warn('Firestore load error:', e);
         window.CloudSync.lastError = _friendlyError(e);
+        window.CloudSync.lastErrorCode = (e && e.code) || '';
         return null;
       }
     };
@@ -1436,26 +1524,58 @@ body.cl-open{overflow:hidden;}
     window.CloudSync.isApplyingRemote = () => _applyingRemote;
   }
 
-  // Executa (ou reexecuta, em caso de retry) o login anônimo + preparo do CloudSync.
-  // Sempre cria uma nova Promise em window.CloudSyncReady para quem for aguardar de novo.
+  // Observa o estado de autenticação (sem login automático). Quando o usuário
+  // loga (via tela de login) ou já tinha uma sessão salva no navegador, conecta
+  // o CloudSync. Quando não há usuário logado, avisa a UI para mostrar a tela
+  // de login — a restrição de acesso de verdade é garantida pelas regras do
+  // Firestore (só e-mails permitidos leem/escrevem), isso aqui é só a porta de entrada.
+  let _cloudWired = false;
   function _startAuth() {
     let _resolve;
     const readyPromise = new Promise(res => { _resolve = res; });
     window.CloudSyncReady = readyPromise;
-    _authOnce().then(() => {
-      _wireCloudSync();
+
+    onAuthStateChanged(auth, user => {
+      if (user) {
+        window.CloudSync.currentUserEmail = user.email || '(sem e-mail)';
+        if (!_cloudWired) { _wireCloudSync(); _cloudWired = true; }
+        window.CloudSync.ready = true;
+        window.CloudSync.lastError = null;
+        if (typeof window.onAuthReady === 'function') window.onAuthReady(user);
+      } else {
+        window.CloudSync.currentUserEmail = null;
+        window.CloudSync.ready = false;
+        if (_unsub) { _unsub(); _unsub = null; }
+        _cloudWired = false;
+        if (typeof window.onAuthRequired === 'function') window.onAuthRequired();
+      }
       _resolve();
-    }).catch(e => {
-      console.warn('Firebase auth error:', e);
+    }, e => {
       window.CloudSync.ready = false;
       window.CloudSync.lastError = _friendlyError(e);
       _resolve();
     });
+
     return readyPromise;
   }
 
-  // Permite que a UI chame window.CloudSync.retry() para tentar reconectar sem recarregar a página
-  window.CloudSync.retry = function() { return _startAuth(); };
+  // Permite que a UI chame window.CloudSync.retry() para tentar reconectar sem
+  // recarregar a página. Não reabre outro listener de auth (evita duplicidade) —
+  // se já existe uma sessão válida (usuário logado), só re-wireia o CloudSync;
+  // se não há usuário logado, quem resolve isso é a tela de login.
+  window.CloudSync.retry = function() {
+    return new Promise(resolve => {
+      const user = auth.currentUser;
+      if (user) {
+        if (!_cloudWired) { _wireCloudSync(); _cloudWired = true; }
+        window.CloudSync.ready = true;
+        window.CloudSync.lastError = null;
+      } else {
+        window.CloudSync.ready = false;
+      }
+      resolve();
+    });
+  };
 
   _startAuth();
 </script>
@@ -1468,6 +1588,21 @@ const MAX_FILE = 10*1024*1024;
 const NUM_SAMPLES = 5; // ← ALTERADO PARA 5 AMOSTRAS
 
 const DEFAULT_AUDITS = [];
+
+// BUGFIX: os IDs de novas auditorias eram gerados como max(id existente)+1.
+// Isso funciona num único navegador, mas agora que os dados são sincronizados
+// em tempo real pelo Firestore entre vários dispositivos/abas, dois usuários
+// criando uma auditoria quase ao mesmo tempo (antes de um ver o item do outro)
+// podem calcular o mesmo "próximo id". Como o documento no Firestore é
+// identificado por esse id, um dos dois acaba sobrescrevendo silenciosamente
+// a auditoria do outro. genAuditId() gera um id praticamente impossível de
+// colidir (timestamp em ms + componente aleatório), mantendo o id numérico
+// que o restante do app espera.
+let _genAuditIdSeq = 0;
+function genAuditId() {
+  _genAuditIdSeq = (_genAuditIdSeq + 1) % 1000;
+  return Date.now() * 1000 + _genAuditIdSeq;
+}
 
 // ===== ESTADO GLOBAL =====
 const state = {
@@ -1522,8 +1657,18 @@ function setCloudStatus(s, detail) {
   el.style.cursor = actionable ? 'pointer' : 'default';
 }
 
+// Conecta (ou reconecta) o CloudSync depois que já sabemos que window.CloudSync.ready
+// é true: busca os dados uma vez, reconcilia com o cache local, e liga o listener
+// de tempo real. Usada no login, no init() e no botão de retry.
+async function connectCloudSyncAndSubscribe() {
+  const remote = await window.CloudSync.loadOnce();
+  await _reconcileCloudLoad(remote);
+  window.CloudSync.subscribe(applyRemoteAudits);
+}
+
 // Tenta reconectar ao Firebase sem precisar recarregar a página.
-// Reexecuta login anônimo + carrega/publica dados + volta a ouvir mudanças em tempo real (onSnapshot).
+// Reconecta o CloudSync (se já houver sessão válida) + carrega/publica dados
+// + volta a ouvir mudanças em tempo real (onSnapshot).
 let _retryingCloud = false;
 async function retryCloudSync() {
   const el = document.getElementById('cloudStatus');
@@ -1534,18 +1679,11 @@ async function retryCloudSync() {
   try {
     await window.CloudSync.retry();
     if (window.CloudSync && window.CloudSync.ready) {
-      const remote = await window.CloudSync.loadOnce();
-      if (Array.isArray(remote) && remote.length > 0) {
-        applyRemoteAudits(remote);
-      } else {
-        const ok = await window.CloudSync.save(state.audits);
-        setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync.lastError);
-      }
-      window.CloudSync.subscribe(applyRemoteAudits);
+      await connectCloudSyncAndSubscribe();
       notify('Conectado à nuvem! Sincronização em tempo real ativa.', 'success');
     } else {
       setCloudStatus('offline', window.CloudSync.lastError);
-      notify(window.CloudSync.lastError || 'Ainda sem conexão com a nuvem.', 'warn');
+      notify(window.CloudSync.lastError || 'Faça login para sincronizar com a nuvem.', 'warn');
     }
   } catch (e) {
     console.warn('Erro ao reconectar com o Firebase:', e);
@@ -1559,6 +1697,85 @@ async function retryCloudSync() {
 // Se a conexão em tempo real cair depois de já estar sincronizada (ex: perda de rede), avisa e permite retry
 window.onCloudSyncLost = function() {
   setCloudStatus('error', window.CloudSync.lastError);
+};
+
+// ===== LOGIN / LOGOUT (e-mail e senha) =====
+// Chamado pela tela de login. Não decide sozinho se o acesso é permitido —
+// isso é responsabilidade das regras do Firestore. Aqui só autentica e,
+// se der certo, o onAuthStateChanged do módulo Firebase dispara window.onAuthReady.
+let _loggingIn = false;
+async function doLogin() {
+  if (_loggingIn) return;
+  const emailEl = document.getElementById('loginEmail');
+  const passEl  = document.getElementById('loginPassword');
+  const errEl   = document.getElementById('loginError');
+  const btnEl   = document.getElementById('loginBtn');
+  const email = (emailEl.value || '').trim();
+  const pass  = passEl.value || '';
+  errEl.style.display = 'none';
+  if (!email || !pass) {
+    errEl.textContent = 'Preencha e-mail e senha.';
+    errEl.style.display = 'block';
+    return;
+  }
+  _loggingIn = true;
+  btnEl.disabled = true;
+  btnEl.textContent = 'Entrando...';
+  try {
+    const result = await window.CloudSync.login(email, pass);
+    if (!result.ok) {
+      errEl.textContent = result.error || 'Não foi possível entrar.';
+      errEl.style.display = 'block';
+    }
+    // Se result.ok, window.onAuthReady cuida do resto (esconder tela, carregar dados).
+  } catch (e) {
+    errEl.textContent = 'Erro inesperado ao entrar. Tente novamente.';
+    errEl.style.display = 'block';
+  } finally {
+    _loggingIn = false;
+    btnEl.disabled = false;
+    btnEl.textContent = 'Entrar';
+  }
+}
+
+function doLogout() {
+  if (!confirm('Deseja sair da sua conta?')) return;
+  window.CloudSync.logout();
+}
+
+// Disparado pelo módulo Firebase quando o login é confirmado (novo login ou sessão salva)
+window.onAuthReady = function(user) {
+  document.getElementById('loginOverlay').classList.remove('active');
+  const box = document.getElementById('loggedUserBox');
+  box.style.display = 'block';
+  document.getElementById('loggedUserEmail').textContent = user.email || '';
+  document.getElementById('loginError').style.display = 'none';
+  document.getElementById('loginPassword').value = '';
+  connectCloudSyncAndSubscribe().then(() => {
+    // Se o login funcionou mas o e-mail não está na lista permitida nas regras
+    // do Firestore, loadOnce() falha com 'permission-denied'. Nesse caso a conta
+    // é válida no Authentication, mas não tem permissão de acesso ao sistema —
+    // desloga na hora e mostra um aviso claro, em vez de deixar a tela travada
+    // com erro de conexão genérico.
+    if (window.CloudSync.lastErrorCode === 'permission-denied') {
+      const deniedEmail = user.email || '';
+      window.CloudSync.logout().then(() => {
+        const errEl = document.getElementById('loginError');
+        errEl.textContent = `O e-mail "${deniedEmail}" não tem permissão de acesso a este sistema. Fale com o administrador.`;
+        errEl.style.display = 'block';
+      });
+    }
+  }).catch(e => {
+    console.warn('Erro ao conectar após login:', e);
+    setCloudStatus('error', (e && e.message) || 'Erro ao carregar dados da nuvem.');
+  });
+};
+
+// Disparado pelo módulo Firebase quando não há usuário logado (nunca logou, ou saiu)
+window.onAuthRequired = function() {
+  document.getElementById('loginOverlay').classList.add('active');
+  document.getElementById('loggedUserBox').style.display = 'none';
+  setCloudStatus('offline', 'Faça login para sincronizar com a nuvem.');
 };
 
 
@@ -2023,7 +2240,7 @@ function saveNew() {
     document.getElementById('nPn').classList.toggle('error', !pn);
     return;
   }
-  const newId = state.audits.reduce((max, a) => Math.max(max, a.id || 0), 0) + 1;
+  const newId = genAuditId();
   state.audits.push({
     id: newId, sap, pn,
     client: document.getElementById('nClient').value,
@@ -2211,6 +2428,113 @@ function exportBackupJSON() {
   closeExportMenu();
 }
 
+// ===== BACKUP AUTOMÁTICO PERIÓDICO =====
+// Enquanto a página ficar aberta, se ativado, gera um backup .json a cada
+// AUTO_BACKUP_INTERVAL_MS automaticamente (baixa o arquivo e também guarda
+// 3 cópias rotativas no localStorage como rede de segurança extra, caso o
+// download automático seja bloqueado pelo navegador).
+const AUTO_BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 horas
+
+function isAutoBackupEnabled() {
+  try { return localStorage.getItem('auto_backup_enabled') === '1'; } catch(e) { return false; }
+}
+
+function updateAutoBackupUI() {
+  const btn  = document.getElementById('autoBackupBtn');
+  const icon = document.getElementById('autoBackupIcon');
+  if (!btn || !icon) return;
+  const on = isAutoBackupEnabled();
+  icon.textContent = on ? '💾' : '🗄️';
+  btn.title = on
+    ? 'Backup automático ATIVO (a cada 6h enquanto a página ficar aberta) — clique para desativar'
+    : 'Backup automático desativado — clique para ativar';
+  btn.style.borderColor = on ? 'var(--success)' : '';
+  btn.style.color = on ? 'var(--success)' : '';
+}
+
+function toggleAutoBackup() {
+  const enabled = isAutoBackupEnabled();
+  try { localStorage.setItem('auto_backup_enabled', enabled ? '0' : '1'); } catch(e) {}
+  updateAutoBackupUI();
+  if (!enabled) {
+    notify('💾 Backup automático ativado (a cada 6h enquanto a página ficar aberta).', 'success');
+    runAutoBackupIfDue(true); // gera um backup imediatamente para começar o ciclo
+  } else {
+    notify('Backup automático desativado.', 'warn');
+  }
+}
+
+function runAutoBackupIfDue(force) {
+  if (!isAutoBackupEnabled()) return;
+  let last = 0;
+  try { last = parseInt(localStorage.getItem('auto_backup_last') || '0', 10) || 0; } catch(e) {}
+  const now = Date.now();
+  if (!force && (now - last) < AUTO_BACKUP_INTERVAL_MS) return;
+  try {
+    // Guarda 3 cópias rotativas no navegador (rede de segurança extra, além do arquivo baixado)
+    try {
+      const slot = 'auto_backup_slot_' + (Math.floor(now / AUTO_BACKUP_INTERVAL_MS) % 3);
+      localStorage.setItem(slot, JSON.stringify({ savedAt: now, audits: state.audits }));
+    } catch(e) {}
+
+    const data  = JSON.stringify(state.audits, null, 2);
+    const blob  = new Blob([data], {type:'application/json'});
+    const url   = URL.createObjectURL(blob);
+    const a     = document.createElement('a');
+    const stamp = new Date(now).toISOString().slice(0,16).replace('T','_').replace(':','h');
+    a.href = url; a.download = `T1-Audit-AutoBackup-${stamp}.json`; a.click();
+    URL.revokeObjectURL(url);
+
+    try { localStorage.setItem('auto_backup_last', String(now)); } catch(e) {}
+    console.log('[AutoBackup] Backup automático gerado em', new Date(now).toLocaleString());
+    notify('💾 Backup automático gerado.', 'success');
+  } catch(e) {
+    console.warn('Erro no backup automático:', e);
+  }
+}
+
+// Verifica a cada 5 minutos se já passou o intervalo configurado
+setInterval(() => runAutoBackupIfDue(false), 5 * 60 * 1000);
+
+// ===== VERIFICAÇÃO MANUAL DE CONEXÃO COM O FIREBASE =====
+// Acionada pelo botão escondido ao lado do botão de Tema. Faz uma consulta
+// real ao Firestore (não usa cache) e mostra um resumo claro do resultado,
+// pra você ter certeza de que a conexão e a sincronização estão OK.
+async function testFirebaseConnection() {
+  notify('🔍 Verificando conexão com o Firebase...', 'success');
+  if (!(window.CloudSync && window.CloudSync.ready)) {
+    alert('❌ Sem conexão com o Firebase.\n\nMotivo: ' + (window.CloudSync?.lastError || 'módulo não carregou (verifique bloqueio de rede/CDN).'));
+    return;
+  }
+  const t0 = performance.now();
+  let remote = null;
+  try {
+    remote = await window.CloudSync.loadOnce();
+  } catch (e) {
+    alert('❌ Erro ao consultar o Firebase:\n' + ((e && e.message) || e));
+    return;
+  }
+  const ms = Math.round(performance.now() - t0);
+
+  if (remote === null) {
+    alert('❌ Falha ao consultar o Firebase.\n\nMotivo: ' + (window.CloudSync?.lastError || 'erro desconhecido.'));
+    return;
+  }
+
+  const localCount  = state.audits.length;
+  const remoteCount = remote.length;
+  const igual = localCount === remoteCount;
+
+  alert(
+    (igual ? '✅ Conexão com o Firebase confirmada e sincronizada.' : '⚠️ Conexão com o Firebase confirmada, mas os números ainda não batem.') +
+    `\n\nTempo de resposta: ${ms} ms` +
+    `\nAuditorias na nuvem (Firestore): ${remoteCount}` +
+    `\nAuditorias na tela (este navegador): ${localCount}` +
+    (igual ? '\n\nTudo certo — sincronização em tempo real ativa.'
+           : '\n\nSe você acabou de fazer uma alteração, aguarde alguns segundos e teste de novo. Se persistir, clique no status "☁️ ..." no menu lateral para forçar uma reconexão.')
+  );
+}
+
 function importBackupJSON(file) {
   if (!file) return;
   if (!confirm(`Restaurar backup "${file.name}"?\n\nTODAS as auditorias atuais serão SUBSTITUÍDAS pelo conteúdo do arquivo.\n\nDeseja continuar?`)) return;
@@ -2234,15 +2558,15 @@ function importBackupJSON(file) {
       renderCharts();
       renderGantt();
 
-      if (window.CloudSync && window.CloudSync.ready && window.CloudSync.save) {
+      if (window.CloudSync && window.CloudSync.ready && window.CloudSync.replaceAll) {
         setCloudStatus('saving');
-        const ok = await window.CloudSync.save(state.audits);
+        const ok = await window.CloudSync.replaceAll(state.audits);
         setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync.lastError);
       } else {
         setCloudStatus('offline');
       }
       if (window.CloudSync && window.CloudSync.resume) window.CloudSync.resume();
-      _verifyWriteSettled(list, 'Restaurar Backup');
+      _verifyWriteSettled(list, 'Restaurar Backup', true);
 
       notify(`✅ ${list.length} auditorias restauradas do backup!`);
       closeImportModal();
@@ -2623,7 +2947,6 @@ function parseWorkbook(wb) {
   addImportLog(`🗺️ SAP:${sapCol} PN:${pnCol} Cliente:${clientCol} JAN:${janCol} Resp:${respCol} Result:${resultCol}`);
 
   const parsed = [];
-  let nextId = state.audits.reduce((max, a) => Math.max(max, a.id||0), 0) + 1;
   let skipped = 0;
   let i = headerRow + 1;
 
@@ -2654,7 +2977,7 @@ function parseWorkbook(wb) {
       const pn        = String(row[pnCol]||'').trim();
 
       if (desc || pn) {
-        parsed.push({id:nextId++, sap:sapRaw, pn, client:String(row[clientCol]||'').trim(), desc, family:String(row[familyCol]||'').trim()||'Outros', risk, months, resp:String(row[respCol]||'').trim(), status, obs:String(row[obsCol]||'').trim(), file:null});
+        parsed.push({id:genAuditId(), sap:sapRaw, pn, client:String(row[clientCol]||'').trim(), desc, family:String(row[familyCol]||'').trim()||'Outros', risk, months, resp:String(row[respCol]||'').trim(), status, obs:String(row[obsCol]||'').trim(), file:null});
       } else skipped++;
     }
     i++;
@@ -2685,6 +3008,7 @@ function parseWorkbook(wb) {
 
 async function applyImport(mode) {
   if (!state_importedAudits.length) return;
+  const _fullReplace = (mode === 'replace');
   if (mode === 'replace') {
     state.audits = state_importedAudits;
     notify(`✅ ${state.audits.length} auditorias importadas (substituição total)`);
@@ -2713,15 +3037,16 @@ async function applyImport(mode) {
   // Mesma proteção do restore: pausa o listener, grava direto (sem debounce),
   // religa só depois de confirmado — evita reversão por snapshot antigo.
   if (window.CloudSync && window.CloudSync.pause) window.CloudSync.pause();
-  if (window.CloudSync && window.CloudSync.ready && window.CloudSync.save) {
+  const _syncFn = _fullReplace ? window.CloudSync.replaceAll : window.CloudSync.save;
+  if (window.CloudSync && window.CloudSync.ready && _syncFn) {
     setCloudStatus('saving');
-    const ok = await window.CloudSync.save(state.audits);
+    const ok = await _syncFn(state.audits);
     setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync.lastError);
   } else {
     setCloudStatus('offline');
   }
   if (window.CloudSync && window.CloudSync.resume) window.CloudSync.resume();
-  _verifyWriteSettled(state.audits, 'Importar Excel');
+  _verifyWriteSettled(state.audits, 'Importar Excel', _fullReplace);
 
   closeImportModal();
 }
@@ -2730,7 +3055,7 @@ async function applyImport(mode) {
 // Verifica, alguns segundos depois de um restore/import em lote, se o documento
 // no Firestore ainda bate com o que acabamos de gravar. Se não bater (outra aba/
 // sessão ou uma escrita offline enfileirada sobrescreveu por cima), regrava e avisa.
-function _verifyWriteSettled(expectedList, label) {
+function _verifyWriteSettled(expectedList, label, useReplaceAll) {
   if (!(window.CloudSync && window.CloudSync.ready)) return;
   const delays = [2500, 6000, 12000]; // checa em 3 momentos ao longo de ~12s
   delays.forEach(ms => {
@@ -2742,7 +3067,8 @@ function _verifyWriteSettled(expectedList, label) {
                      JSON.stringify(remote) === JSON.stringify(expectedList);
         if (!same) {
           console.warn(`[${label}] Documento no Firestore não bate com o que foi gravado (checagem em ${ms}ms) — outra escrita concorrente detectada. Regravando...`);
-          await window.CloudSync.save(expectedList);
+          const _fn = (useReplaceAll && window.CloudSync.replaceAll) ? window.CloudSync.replaceAll : window.CloudSync.save;
+          await _fn(expectedList);
           state.audits   = expectedList;
           state.filtered = [...state.audits];
           try { localStorage.setItem('audits_t1_cache', JSON.stringify(state.audits)); } catch(e) {}
@@ -2791,6 +3117,7 @@ function loadLocalAudits() {
 // Aplica dados vindos da nuvem (Firestore) na tela, sem entrar em loop de salvamento
 function applyRemoteAudits(audits) {
   if (!Array.isArray(audits)) return;
+  _markCloudSyncedOnce();
   state.audits = audits;
   state.filtered = [...state.audits];
   try { localStorage.setItem('audits_t1_cache', JSON.stringify(state.audits)); } catch(e) {}
@@ -2799,6 +3126,55 @@ function applyRemoteAudits(audits) {
   renderCharts();
   renderGantt();
   setCloudStatus('synced');
+}
+
+// BUGFIX: quando a coleção do Firestore estava vazia (ex.: dados apagados de
+// propósito direto no console do Firebase), o app tratava isso como "nuvem
+// nova" e reenviava o cache local antigo (localStorage) de volta pra cima —
+// fazendo dados apagados "voltarem" e o dashboard continuar mostrando números
+// antigos em vez de zerado. CLOUD_SYNCED_ONCE_KEY guarda se este navegador já
+// teve uma troca real e confirmada com o Firestore antes. Se sim, uma coleção
+// vazia agora é tratada como verdade (dados realmente vazios) — a tela é
+// zerada e NADA é reenviado. Só na primeiríssima conexão (nunca sincronizou
+// antes) é que o cache local é usado para "semear" a nuvem.
+const CLOUD_SYNCED_ONCE_KEY = 'cloud_synced_once_t1';
+function _wasCloudSyncedBefore() {
+  try { return localStorage.getItem(CLOUD_SYNCED_ONCE_KEY) === '1'; } catch(e) { return false; }
+}
+function _markCloudSyncedOnce() {
+  try { localStorage.setItem(CLOUD_SYNCED_ONCE_KEY, '1'); } catch(e) {}
+}
+// Migração: navegadores que já usavam o app ANTES desta correção já têm um
+// cache local (audits_t1_cache) mas ainda não têm a flag nova. Nesses casos,
+// assumimos que já houve sincronização real no passado (senão não existiria
+// cache) — do contrário, a própria correção acima reenviaria o cache antigo
+// pra nuvem na primeira carga, repetindo o problema que estamos corrigindo.
+try {
+  if (localStorage.getItem(CLOUD_SYNCED_ONCE_KEY) === null && localStorage.getItem('audits_t1_cache') !== null) {
+    localStorage.setItem(CLOUD_SYNCED_ONCE_KEY, '1');
+  }
+} catch(e) {}
+
+// Decide o que fazer com o resultado de CloudSync.loadOnce() ao conectar/reconectar.
+async function _reconcileCloudLoad(remote) {
+  if (Array.isArray(remote) && remote.length > 0) {
+    applyRemoteAudits(remote);
+    return;
+  }
+  if (Array.isArray(remote) && remote.length === 0) {
+    if (_wasCloudSyncedBefore()) {
+      // Nuvem realmente vazia (não é a primeira conexão) → reflete isso na tela.
+      applyRemoteAudits([]);
+    } else {
+      // Primeira conexão desta sessão/navegador: usa o cache local (se houver)
+      // para popular a nuvem pela primeira vez.
+      const ok = await window.CloudSync.save(state.audits);
+      setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync?.lastError);
+      if (ok) _markCloudSyncedOnce();
+    }
+    return;
+  }
+  // remote === null → erro/offline: mantém o cache local como está, sem mudanças.
 }
 
 function toggleTheme() {
@@ -4440,6 +4816,8 @@ async function init() {
   renderMetrics();
   renderCharts();
   renderGantt();
+  updateAutoBackupUI();
+  runAutoBackupIfDue(false);
 
   document.addEventListener('click', e => {
     if (!e.target.closest('.export-btn-wrap')) closeExportMenu();
@@ -4447,26 +4825,13 @@ async function init() {
 
   document.getElementById('loading').classList.remove('active');
 
-  // Aguarda a conexão com o Firebase (login anônimo) e então sincroniza
+  // Verifica se já existe sessão (login salvo no navegador) ou não — a partir
+  // daí, window.onAuthReady / window.onAuthRequired (definidos acima) cuidam
+  // de mostrar a tela de login ou conectar e sincronizar os dados.
   try {
     await window.CloudSyncReady;
-    if (window.CloudSync && window.CloudSync.ready) {
-      const remote = await window.CloudSync.loadOnce();
-      if (Array.isArray(remote) && remote.length > 0) {
-        applyRemoteAudits(remote);
-      } else {
-        // Nuvem vazia: envia o que já temos localmente para criar o documento
-        const ok = await window.CloudSync.save(state.audits);
-        setCloudStatus(ok ? 'synced' : 'error', ok ? null : window.CloudSync?.lastError);
-      }
-      // Passa a ouvir mudanças feitas em outros navegadores/computadores em tempo real
-      window.CloudSync.subscribe(applyRemoteAudits);
-    } else {
-      setCloudStatus('offline', window.CloudSync?.lastError || 'Módulo Firebase não carregou (verifique bloqueio de CDN/rede).');
-    }
   } catch (e) {
-    console.warn('Erro ao sincronizar com Firebase:', e);
-    setCloudStatus('error', (e && e.message) || window.CloudSync?.lastError);
+    console.warn('Erro ao verificar sessão do Firebase:', e);
   }
 }
 
