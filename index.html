@@ -3993,8 +3993,7 @@ function openChecklist(auditId, monthIndex) {
 
   const saved_d = a.checklistsByMonth[monthIndex];
   document.getElementById('clFooterInfo').textContent = clReadonly
-    ? 'Auditoria finalizada em ' + (saved_d?.closingDate || saved_d?.completedAt?.slice(0,10) || '?')
-      + ' · Score: ' + (saved_d?.score || '—') + ' · Decisão: ' + (saved_d?.decision || '—')
+    ? ''
     : 'Preencha o checklist e clique em Finalizar.';
 
   const _ov = document.getElementById('checklistOverlay');
